@@ -55,6 +55,18 @@ variable "log_prefix" {
   default = "runner"
 }
 
+variable "state_bucket" {
+  description = "PERSISTENT bucket: terraform tfstate lives here, never deleted"
+  type        = string
+  default     = "localemu-tf-state"
+}
+
+variable "state_prefix" {
+  description = "object key (inside state_bucket) holding this project's tfstate"
+  type        = string
+  default     = "state/aws_test.tfstate"
+}
+
 variable "ami" {
   description = "ami-ubuntu-22.04 -> localemu/ec2-base:v4 (curl, awscli, sshd, iptables)"
   type        = string
@@ -171,8 +183,29 @@ resource "aws_instance" "vm" {
 # ------------------------------------------------------------------------------
 # 1. the local-AWS bucket the runner posts its job logs to
 # ------------------------------------------------------------------------------
+# exist_ok: the vm's checkout carries no tfstate (state lives in the state
+# bucket below), so a re-deploy must adopt the existing bucket, not fail with
+# BucketAlreadyExists
 resource "aws_s3_bucket" "runner_logs" {
-  bucket = var.bucket_name
+  bucket   = var.bucket_name
+  exist_ok = true
+}
+
+# ------------------------------------------------------------------------------
+# 1b. the PERSISTENT state bucket — terraform's tfstate lives here, not in git.
+#     Created once, never destroyed (no CI job deletes it), so every deploy from
+#     the vm starts from the same view of the emulator.
+# ------------------------------------------------------------------------------
+resource "aws_s3_bucket" "state_store" {
+  bucket   = var.state_bucket
+  exist_ok = true
+}
+
+resource "aws_s3_object" "state_marker" {
+  bucket      = aws_s3_bucket.state_store.bucket
+  key         = "README-state-bucket.txt"
+  content     = "terraform/OpenTofu tfstate is stored under this prefix: ${var.state_prefix}\n"
+  content_type = "text/plain"
 }
 
 resource "aws_s3_object" "folder" {
@@ -224,4 +257,16 @@ output "igw_id" {
 
 output "s3_root" {
   value = local.s3_root
+}
+
+output "state_bucket" {
+  value = var.state_bucket
+}
+
+output "state_key" {
+  value = var.state_prefix
+}
+
+output "state_s3" {
+  value = "s3://${var.state_bucket}/${var.state_prefix}"
 }

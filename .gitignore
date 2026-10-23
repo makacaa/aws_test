@@ -4,6 +4,9 @@ terraform.tfstate
 terraform.tfstate.backup
 terraform.tfstate.d/
 
+# tfstate is NOT committed: it lives in the persistent state bucket
+# (localemu-tf-state : state/aws_test.tfstate), pulled/pushed by the Action
+
 # python
 __pycache__/
 *.pyc

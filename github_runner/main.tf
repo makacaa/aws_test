@@ -18,7 +18,8 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 6.70"
+      version = "6.70.0"   # exact pin: the vm's tofu 1.13.2 would otherwise pull
+                           # a newer aws module that dropped exist_ok
     }
   }
 }
@@ -183,12 +184,11 @@ resource "aws_instance" "vm" {
 # ------------------------------------------------------------------------------
 # 1. the local-AWS bucket the runner posts its job logs to
 # ------------------------------------------------------------------------------
-# exist_ok: the vm's checkout carries no tfstate (state lives in the state
-# bucket below), so a re-deploy must adopt the existing bucket, not fail with
-# BucketAlreadyExists
+# no exist_ok in aws module 6.70.0 (it was a 6.69.x feature): idempotency comes
+# from the tfstate pulled out of the state bucket before plan/apply runs, so the
+# bucket is already in state and is never re-created.
 resource "aws_s3_bucket" "runner_logs" {
-  bucket   = var.bucket_name
-  exist_ok = true
+  bucket = var.bucket_name
 }
 
 # ------------------------------------------------------------------------------
@@ -197,8 +197,7 @@ resource "aws_s3_bucket" "runner_logs" {
 #     the vm starts from the same view of the emulator.
 # ------------------------------------------------------------------------------
 resource "aws_s3_bucket" "state_store" {
-  bucket   = var.state_bucket
-  exist_ok = true
+  bucket = var.state_bucket
 }
 
 resource "aws_s3_object" "state_marker" {

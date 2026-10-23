@@ -31,6 +31,9 @@ jobs:
   deploy:
     runs-on: self-hosted            # = the tiny vm (localemu-ec2-i-…)
     steps:
+      - name: Checkout (the runner's workspace lives inside the vm)
+        uses: actions/checkout@v4
+
       - name: What vm am I (the runner IS the emulated vm)
         run: |
           set -euo pipefail
@@ -59,6 +62,9 @@ jobs:
           # inside the vm "localhost" is the vm itself; the emulator is on its
           # host, so the gateway host has to be the host gateway
           cd github_runner
+          # the checked-out tree has no tfstate (gitignored) and the lock file was
+          # resolved by tofu 1.12.6 on the host, so re-resolve the aws module here
+          rm -f .terraform.lock.hcl
           tofu init
           tofu plan  -var gateway_host=host.docker.internal
           tofu apply -var gateway_host=host.docker.internal --auto-approve

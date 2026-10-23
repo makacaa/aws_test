@@ -1,0 +1,127 @@
+name: 2-deploy
+
+# STAGE 2 of 2 — the deploy. Its own box in Actions, and it only ever runs when
+# YOU start it and type the approval phrase. Nothing auto-triggers it: there is
+# no push trigger anywhere in this repo's workflows.
+#
+#   Actions → 2-deploy → Run workflow → input box → type:  DEPLOY
+#
+# Anything other than exactly DEPLOY stops the job before it touches anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      approve:
+        description: "type DEPLOY to approve this stage-2 deploy (anything else stops)"
+        type: string
+        required: true
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_PAGER: ""
+  NO_COLOR: "1"
+  TOFU_DISABLE_COLOR: "1"
+
+jobs:
+  deploy:
+    runs-on: self-hosted            # = the tiny vm (registered self-hosted runner)
+    steps:
+      - name: Approval gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.approve }}" != "DEPLOY" ]; then
+            echo "not approved — type exactly DEPLOY to run stage 2. Nothing was touched."
+            exit 1
+          fi
+          echo "approved by: ${GITHUB_ACTOR}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install OpenTofu
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/local/bin/tofu ]; then
+            curl -fsSL -o /tmp/tofu.tar.gz "https://github.com/opentofu/opentofu/releases/download/v1.13.2/tofu_1.13.2_linux_amd64.tar.gz"
+            mkdir -p /tmp/tofu-bin
+            tar -xzf /tmp/tofu.tar.gz -C /tmp/tofu-bin
+            mv "$(find /tmp/tofu-bin -type f -name tofu | head -1)" /usr/local/bin/tofu
+            chmod 755 /usr/local/bin/tofu
+          fi
+          tofu version
+
+      - name: Pull tfstate from the state bucket
+        run: |
+          set -euo pipefail
+          cd github_runner
+          aws s3 cp "s3://localemu-tf-state/state/aws_test.tfstate" terraform.tfstate \
+            || echo "no tfstate yet (fresh deploy)"
+
+      - name: tofu apply (approved)
+        run: |
+          set -euo pipefail
+          cd github_runner
+          rm -f .terraform.lock.hcl
+          tofu init
+          tofu apply -var gateway_host=host.docker.internal --auto-approve
+          echo "instance_id=$(tofu output --raw ec2_instance_id)"
+          echo "vm_container=$(tofu output --raw vm_container)"
+          echo "igw=$(tofu output --raw igw_id)"
+
+      - name: push tfstate back into the persistent state bucket
+        run: |
+          set -euo pipefail
+          cd github_runner
+          aws s3 cp terraform.tfstate "s3://localemu-tf-state/state/aws_test.tfstate"
+          aws s3 cp terraform.tfstate.backup "s3://localemu-tf-state/state/aws_test.tfstate.backup" \
+            || echo "no backup (nothing changed)"
+
+      - name: vm -> s3 (aws s3 cp from inside the vm)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/vm-outbox
+          {
+            echo "hello from the runner vm"
+            echo "instance_id = ${LOCALEMU_INSTANCE_ID:-?}"
+            echo "action      = 2-deploy (approved)"
+            echo "written_at  = $(date -u +%FT%TZ)"
+          } > /tmp/vm-outbox/from-action.txt
+          cp data/vm-payload/vm-hello.txt   /tmp/vm-outbox/vm-hello.txt
+          cp data/vm-payload/vm-report.json /tmp/vm-outbox/vm-report.json
+          for f in from-action.txt vm-hello.txt vm-report.json; do
+            aws s3 cp "/tmp/vm-outbox/$f" "s3://localemu-runner-logs/runner/from-vm/$f"
+          done
+          aws s3api put-object --bucket localemu-runner-logs --key "runner/from-vm/" >/dev/null
+
+      - name: verify the round trip from inside the vm
+        run: |
+          set -euo pipefail
+          aws s3 ls --recursive s3://localemu-runner-logs/runner/
+          for f in from-action.txt vm-hello.txt vm-report.json; do
+            a=$(sha256sum "/tmp/vm-outbox/$f" 2>/dev/null | cut -d' ' -f1 || echo -)
+            b=$(aws s3 cp "s3://localemu-runner-logs/runner/from-vm/$f" - 2>/dev/null | sha256sum | cut -d' ' -f1 || echo -)
+            printf "%-16s vm=%s s3=%s %s\n" "$f" "$a" "$b" \
+              "$([ "$a" = "$b" ] && echo MATCH || echo DIFF)"
+          done
+
+      - name: inventory after deploy (EC2 graph + S3, signed)
+        run: |
+          set -euo pipefail
+          python3 tools/vm-inspect.py \
+            --bucket localemu-runner-logs --prefix runner/ \
+            --instance "$(cd github_runner && tofu output --raw ec2_instance_id)" || true
+
+      - name: summary
+        run: |
+          {
+            echo "## STAGE 2/2 — deploy (approved)"
+            echo "- approved input: \`DEPLOY\`"
+            echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`"
+            echo "- payload: \`s3://localemu-runner-logs/runner/from-vm/\`"
+            echo "- tfstate: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
+            echo '```'
+            aws s3 ls --recursive s3://localemu-runner-logs/runner/
+            aws s3 ls s3://localemu-tf-state/state/
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -304,3 +304,53 @@ gh api "repos/<owner>/<repo>/actions/runs/<id>/jobs" --jq '.jobs[]|"\(.name) \(.
 
 Expect: buckets present, objects with real byte counts, one `running` instance
 (the runner), plan/apply jobs `completed success`, secrets `***` in logs.
+
+---
+
+## 9. Restarting the emulator (cold start) — what survives and what does not
+
+Verified on this repo (2026-10-23): stopping LocalEmu + `docker stop` on the vm
+container took the GitHub runner **offline**, and a fresh emulator starts with
+**no buckets, no EC2 records, no tfstate**. Nothing "re-registers" itself.
+
+```bash
+# 1. stop the emulator (localemu stop is broken on Windows)
+PID=$(netstat -ano | grep LISTENING | grep 4566 | awk '{print $NF}' | head -1)
+taskkill //PID $PID //F
+docker stop <localemu-ec2-i-…>            # the vm container = the runner
+# → gh api repos/<o>/<r>/actions/runners  ⇒  status: offline   (jobs can no longer run)
+
+# 2. start it again — UTF-8 is REQUIRED on a Windows console (Unicode banner crash)
+PYTHONUTF8=1 PYTHONIOENCODING=utf-8 localemu start --port 4566 > emu.log 2>&1 &
+curl -s http://localhost:4566/_health     # fresh gateway (S3 says NoSuchBucket = clean)
+
+# 3. rebuild the vm from the HOST (no runner exists to run CI)
+set -a; source secrets.env; set +a
+export AWS_ENDPOINT_URL=http://localhost:4566
+cd github_runner && rm -f terraform.tfstate* .terraform.lock.hcl
+tofu init && tofu apply --auto-approve -var gateway_host=localhost
+aws s3 cp terraform.tfstate s3://<state-bucket>/state/<project>.tfstate
+
+# 4. re-register the new container as a self-hosted runner
+CID=$(docker ps --filter name=localemu-ec2 --format "{{.ID}}" | head -1)
+TOK=$(gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token --jq .token)
+docker exec -d $CID bash -c "cd /runner
+  curl -fsSL -o /tmp/r.tgz https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-linux-x64-2.338.0.tar.gz
+  tar -xzf /tmp/r.tgz -C /runner
+  export RUNNER_ALLOW_RUNASROOT=1          # the AMI runs the vm as root
+  ./config.sh --url https://github.com/<owner>/<repo> --token $TOK
+  nohup ./run.sh > /runner/runner.log 2>&1 &"
+# → gh api repos/<o>/<r>/actions/runners ⇒ <CID> online ; "Listening for Jobs"
+```
+
+Rules learned:
+* `bin/Runner.Listener` alone says *"Not configured"* — you must run **`config.sh`
+  first** (`--url … --token …`), then **`run.sh`** with no args.
+* `run.sh`/`config.sh` refuse to run as root unless **`RUNNER_ALLOW_RUNASROOT=1`**.
+* Git-Bash mangles `/runner/…` paths inside `docker exec` → prefix with
+  `MSYS_NO_PATHCONV=1`.
+* After a cold start the inventory shows **one** instance (`current`), all the
+  old orphan `i-…`/`vpc-…` records are gone — that is the only way to get a tidy
+  graph.
+* The state bucket is wiped with the emulator: re-push `terraform.tfstate` right
+  after the fresh `apply`, otherwise the next plan re-creates everything.

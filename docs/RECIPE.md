@@ -122,13 +122,24 @@ fails with a connect error (not an HTTP error).
 
 ### 3.3 Inspecting what exists
 
-`localemu list` shows S3/FIRE rows only. Use the signed tools instead
-(`tools/vm-inspect.py`, run **from inside the vm**):
+### 3.3 What the emulator does and does not show (verified on 1.3.2)
 
-```
-aws s3 ls / aws s3api list-objects-v2      # buckets + objects
-aws emu describe-services                  # every service LocalEmu implements
-aws emu describe-instances                 # EC2 records incl. stopped ones
+There is **no `localemu list`** command. The CLI is:
+`start | status | services | ssh | export | import`.
+
+| way to look | what you actually get |
+|---|---|
+| `http://localhost:4566/_localemu/dashboard` | a services browser only. `GET /_localemu/api/overview` returns `{version, uptime_seconds, port, features, services}` — **no resource data at all**, so the dashboard can never show "the vm" or "the buckets" |
+| `localemu ssh --list` | **the EC2 instances that are actually running** (docker names) — this is the reliable EC2 view |
+| `docker ps` | the same containers: `localemu-ec2-i-…` + `localemu-imds-vpc-…` |
+| `aws s3 ls` / `aws s3 ls --recursive` (signed) | buckets + objects with byte counts |
+| `tools/vm-inspect.py` (signed boto3) | `DescribeInstances` + VPC/IGW/subnet/SG graph + S3 listing — the full picture |
+| `localemu export --format json` | `resources: []` — it does **not** track EC2/S3 objects, don't use it as an inventory |
+| `aws emu …` | only works with the emulator-patched CLI; the AMI's `aws` is vanilla → `aws: error: argument command: Invalid choice` |
+
+```bash
+localemu ssh --list
+python tools/vm-inspect.py --bucket <payload-bucket> --prefix <prefix>/ --instance "$IID"
 ```
 
 ---

@@ -16,9 +16,9 @@ name: vm-s3-deploy
 #   tfstate   ─▶ s3://localemu-tf-state/state/aws_test.tfstate  (persistent bucket)
 #   payload   ─▶ s3://localemu-runner-logs/runner/from-vm/       (written by the vm)
 
+# ONE entry point: nothing runs by itself. A `push:` trigger would fire a run on
+# every commit — that is where the duplicate run in the list came from.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       approve_deploy:
@@ -82,13 +82,18 @@ jobs:
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
-          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin | tee /tmp/plan.txt | tail -40
+          # NO_COLOR + TOFU_DISABLE_COLOR: tofu's ANSI colours show up as ?[32m
+          # garbage in the Actions log/summary, so ask for plain text and strip
+          # any escape sequences that still slip through.
+          export NO_COLOR=1 TOFU_DISABLE_COLOR=1
+          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
+            | sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tee /tmp/plan.txt | tail -40
           {
             echo "## STEP 1/2 — plan (nothing deployed)"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  gateway: \`${AWS_ENDPOINT_URL:-?}\`"
             echo "- state: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
-            cat /tmp/plan.txt
+            grep -E "Plan:|will be created|will be updated|will be destroyed|^ *# |^ *[-+~] aws_|to add" /tmp/plan.txt | head -40
             echo '```'
             echo "> **This workflow stops here.** To deploy, run it again and set"
             echo "> \`approve_deploy = APPLY\` (Actions → vm-s3-deploy → Run workflow)."
@@ -129,6 +134,7 @@ jobs:
       - name: tofu apply (approved)
         run: |
           set -euo pipefail
+          export NO_COLOR=1 TOFU_DISABLE_COLOR=1   # plain text in the Actions log
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init

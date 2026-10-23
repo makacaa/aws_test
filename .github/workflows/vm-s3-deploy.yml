@@ -1,59 +1,69 @@
 name: vm-s3-deploy
 
-# ONE workflow, TWO steps:
-#   step 1  plan   — always runs, never mutates anything
-#   step 2  apply  — runs ONLY when the dispatch input says "apply" (manual
-#                    approval), and then does the vm -> s3 copy + verification
+# TWO SEPARATE STEPS, ONE WORKFLOW
 #
-# It runs ON the tiny vm: the emulated EC2 instance (aws_instance "github_runner",
-# a real Ubuntu container launched by LocalEmu) is registered as a GitHub
+#   STEP 1  plan     runs on every push AND on demand. It writes nothing, prints
+#                    the plan, and then the workflow ENDS. Nothing else runs.
+#   STEP 2  deploy   never runs automatically. It runs only when you start this
+#                    workflow a second time and pick "APPLY" in the input box —
+#                    i.e. it waits for you.
+#
+# Both steps run ON the tiny vm: the emulated EC2 instance aws_instance "github_runner"
+# (a real Ubuntu container launched by LocalEmu) is registered as a GitHub
 # self-hosted runner, so `runs-on: self-hosted` executes inside that vm.
 #
-#   terraform  ──▶  LocalEmu (local AWS, host.docker.internal:4566)
-#   tfstate    ──▶  s3://localemu-tf-state/state/aws_test.tfstate   (persistent
-#                    bucket, created by the config, never deleted)
-#   payload    ──▶  s3://localemu-runner-logs/runner/from-vm/        (from the vm)
-#   egress     ──▶  github.com (internet, via the VPC's Internet Gateway)
+#   terraform ─▶ LocalEmu (local AWS, host.docker.internal:4566)
+#   tfstate   ─▶ s3://localemu-tf-state/state/aws_test.tfstate  (persistent bucket)
+#   payload   ─▶ s3://localemu-runner-logs/runner/from-vm/       (written by the vm)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
-      approve:
-        description: "manual approval — 'plan only' stops after step 1"
+      approve_deploy:
+        description: "STEP 2 gate — leave as 'no' to only run the plan; choose 'APPLY' to deploy"
         type: select
-        default: plan only
+        default: "no"
         options:
-          - plan only
-          - apply
+          - "no"
+          - "APPLY"
 
 jobs:
   # ==========================================================================
-  # STEP 1 — plan only (no writes)
+  # STEP 1 — plan only. Ends here unless you re-run with approve_deploy=APPLY.
   # ==========================================================================
   plan:
     runs-on: self-hosted
     steps:
-      - name: Checkout (workspace lives inside the vm)
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show the vm the runner is
+      - name: Show the vm + the whole EC2 graph (what the emulator actually holds)
         run: |
           set -euo pipefail
-          echo "instance : ${LOCALEMU_INSTANCE_ID:-?}"
-          echo "type     : ${LOCALEMU_INSTANCE_TYPE:-?}"
-          echo "gateway  : ${AWS_ENDPOINT_URL:-?}"
-          curl -fsS -o /dev/null -w "github.com http=%{http_code}\n" -m 25 https://github.com/ || true
-          curl -s -o /dev/null -w "emulator   http=%{http_code}\n" -m 10 "${AWS_ENDPOINT_URL:-http://localhost:4566}/_health" || true
+          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+          export AWS_PAGER=""
+          echo "-- the vm this job runs on --"
+          echo "LOCALEMU_INSTANCE_ID=${LOCALEMU_INSTANCE_ID:-?}  type=${LOCALEMU_INSTANCE_TYPE:-?}"
+          echo "gateway=${AWS_ENDPOINT_URL:-?}"
+          curl -sS -m 5 -H 'Accept: text/plain' http://169.254.169.254/latest/meta-data/instance-id || true
+          echo "-- docker: the instance containers LocalEmu launched --"
+          docker ps -a 2>/dev/null | grep -E "localemu-ec2|imds" || echo "  (no docker client inside the vm — the vm IS the container)"
+          echo "-- signed, region-correct EC2 + S3 inventory --"
+          python3 tools/vm-inspect.py --bucket localemu-runner-logs --prefix runner/ || true
 
       - name: Install OpenTofu (through the vm's internet egress)
         run: |
           set -euo pipefail
-          url="https://github.com/opentofu/opentofu/releases/download/v1.13.2/tofu_1.13.2_linux_amd64.tar.gz"
-          curl -fsSL -o /tmp/tofu.tar.gz "$url"
-          mkdir -p /tmp/tofu-bin
-          tar -xzf /tmp/tofu.tar.gz -C /tmp/tofu-bin
-          mv "$(find /tmp/tofu-bin -type f -name tofu | head -1)" /usr/local/bin/tofu
-          chmod 755 /usr/local/bin/tofu
+          if [ ! -x /usr/local/bin/tofu ]; then
+            curl -fsSL -o /tmp/tofu.tar.gz "https://github.com/opentofu/opentofu/releases/download/v1.13.2/tofu_1.13.2_linux_amd64.tar.gz"
+            mkdir -p /tmp/tofu-bin
+            tar -xzf /tmp/tofu.tar.gz -C /tmp/tofu-bin
+            mv "$(find /tmp/tofu-bin -type f -name tofu | head -1)" /usr/local/bin/tofu
+            chmod 755 /usr/local/bin/tofu
+          fi
           tofu version
 
       - name: Pull tfstate out of the persistent state bucket
@@ -63,35 +73,32 @@ jobs:
           export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
           export AWS_PAGER=""
           cd github_runner
-          if ! aws s3 ls "s3://$(tofu output --raw state_bucket 2>/dev/null || echo localemu-tf-state)" >/dev/null 2>&1; then
-            echo "state bucket not created yet — first deploy starts from empty state"
-          fi
           aws s3 cp "s3://localemu-tf-state/state/aws_test.tfstate" terraform.tfstate \
             || echo "no tfstate yet (fresh deploy)"
 
-      - name: tofu plan (step 1 of 2 — nothing is written)
+      - name: tofu plan (writes nothing)
         run: |
           set -euo pipefail
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
-          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
-            | tee /tmp/plan.txt | tail -40
+          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin | tee /tmp/plan.txt | tail -40
           {
-            echo "## step 1/2 — plan"
+            echo "## STEP 1/2 — plan (nothing deployed)"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  gateway: \`${AWS_ENDPOINT_URL:-?}\`"
             echo "- state: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
             cat /tmp/plan.txt
             echo '```'
-            echo "> approve by re-running this workflow with **approve = apply**."
+            echo "> **This workflow stops here.** To deploy, run it again and set"
+            echo "> \`approve_deploy = APPLY\` (Actions → vm-s3-deploy → Run workflow)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ==========================================================================
-  # STEP 2 — apply, only on manual approval
+  # STEP 2 — deploy. Only runs when you approve it by hand.
   # ==========================================================================
-  apply:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.approve == 'apply'
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.approve_deploy == 'APPLY'
     runs-on: self-hosted
     steps:
       - name: Checkout
@@ -119,15 +126,16 @@ jobs:
           aws s3 cp "s3://localemu-tf-state/state/aws_test.tfstate" terraform.tfstate \
             || echo "no tfstate yet (fresh deploy)"
 
-      - name: tofu apply (step 2/2 — approved)
+      - name: tofu apply (approved)
         run: |
           set -euo pipefail
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
           tofu apply -var gateway_host=host.docker.internal --auto-approve
-          tofu output --raw ec2_instance_id
-          tofu output --raw vm_container
+          echo "instance_id=$(tofu output --raw ec2_instance_id)"
+          echo "vm_container=$(tofu output --raw vm_container)"
+          echo "vpc=$(tofu output --raw igw_id)"
 
       - name: push tfstate back into the persistent state bucket
         run: |
@@ -136,11 +144,9 @@ jobs:
           export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
           export AWS_PAGER=""
           cd github_runner
-          aws s3api create-bucket --bucket localemu-tf-state >/dev/null 2>&1 || true
           aws s3 cp terraform.tfstate "s3://localemu-tf-state/state/aws_test.tfstate"
           aws s3 cp terraform.tfstate.backup "s3://localemu-tf-state/state/aws_test.tfstate.backup" \
             || echo "no backup (nothing changed)"
-          aws s3 ls s3://localemu-tf-state/state/
 
       - name: vm -> s3 (aws s3 cp from inside the vm)
         run: |
@@ -176,10 +182,17 @@ jobs:
               "$([ "$a" = "$b" ] && echo MATCH || echo DIFF)"
           done
 
+      - name: inventory after deploy (EC2 graph + S3, signed)
+        run: |
+          set -euo pipefail
+          python3 tools/vm-inspect.py \
+            --bucket localemu-runner-logs --prefix runner/ \
+            --instance "$(cd github_runner && tofu output --raw ec2_instance_id)" || true
+
       - name: summary
         run: |
           {
-            echo "## step 2/2 — apply (approved)"
+            echo "## STEP 2/2 — deploy (approved)"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`"
             echo "- payload: \`s3://localemu-runner-logs/runner/from-vm/\`"
             echo "- tfstate: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
@@ -187,8 +200,5 @@ jobs:
             AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
             AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
             aws s3 ls --recursive s3://localemu-runner-logs/runner/
-            AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
-            AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-            aws s3 ls s3://localemu-tf-state/state/
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -16,7 +16,8 @@ import sys
 import boto3
 from botocore.exceptions import ClientError
 
-GATEWAY = "http://localhost:4566"
+import os
+GATEWAY = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:4566")  # inside the vm this is host.docker.internal
 REGION = "us-east-1"
 
 
@@ -62,6 +63,23 @@ out = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True)
 for line in (out.stdout or "").splitlines():
     if "localemu-ec2" in line or "localemu-imds" in line:
         print("  " + line.strip())
+
+def pick(resp, *keys):
+    for k in keys:
+        if k in resp:
+            return resp[k]
+    return []
+
+
+print("\n== EC2 graph: VPC / Internet Gateway / subnet / SG ==")
+for v in pick(ec2.describe_vpcs(), "VPCs", "Vpcs", "VpcList"):
+    print("  vpc    %-24s %s" % (v["VpcId"], v.get("Status", "")))
+for g in ec2.describe_internet_gateways().get("InternetGateways", []):
+    print("  igw    %-24s" % g["InternetGatewayId"])
+for sn in pick(ec2.describe_subnets(), "Subnets", "SubnetList"):
+    print("  subnet %-24s %s" % (sn["SubnetId"], sn.get("VpcId", "")))
+for sg in ec2.describe_security_groups().get("SecurityGroups", []):
+    print("  sg     %-24s %s" % (sg["GroupId"], sg.get("VpcId", "")))
 
 print("\n== S3: list_objects_v2 under %s/%s ==" % (BUCKET, PREFIX))
 try:

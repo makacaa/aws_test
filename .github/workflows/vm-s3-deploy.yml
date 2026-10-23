@@ -75,14 +75,14 @@ jobs:
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
-          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin
-          tofu view --json /tmp/plan.bin > /tmp/plan.json || true
+          tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
+            | tee /tmp/plan.txt | tail -40
           {
             echo "## step 1/2 — plan"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  gateway: \`${AWS_ENDPOINT_URL:-?}\`"
             echo "- state: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
-            tofu view /tmp/plan.bin || tofu plan -var gateway_host=host.docker.internal --summary
+            cat /tmp/plan.txt
             echo '```'
             echo "> approve by re-running this workflow with **approve = apply**."
           } >> "$GITHUB_STEP_SUMMARY"

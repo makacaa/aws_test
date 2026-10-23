@@ -78,8 +78,8 @@ locals {
 provider "aws" {
   region       = "us-east-1"
   endpoint_url = "http://${var.gateway_host}:4566"
-  access_key   = "AKIAIOSFODNN7EXAMPLE"
-  secret_key   = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  # NO creds here: they come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
+  # environment (CI = GitHub secrets, host = source secrets.env, vm = IMDS)
 }
 ```
 

@@ -1,4 +1,4 @@
-name: 2-deploy
+name: test_vm_and_s3_deploy
 
 # STAGE 2 of 2 — the deploy. Its own box in Actions, and it only ever runs when
 # YOU start it and type the approval phrase. Nothing auto-triggers it: there is
@@ -24,7 +24,7 @@ env:
   TOFU_DISABLE_COLOR: "1"
 
 jobs:
-  deploy:
+  test_vm_and_s3_deploy:
     runs-on: self-hosted            # = the tiny vm (registered self-hosted runner)
     steps:
       - name: Approval gate

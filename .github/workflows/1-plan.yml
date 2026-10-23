@@ -1,4 +1,4 @@
-name: 1-plan
+name: test_vm_and_s3_plan
 
 # STAGE 1 of 2 — plan only. Its own box in Actions. It writes nothing and ends.
 # When you have read the plan, start stage 2 separately:
@@ -16,7 +16,7 @@ env:
   TOFU_DISABLE_COLOR: "1"
 
 jobs:
-  plan:
+  test_vm_and_s3_plan:
     runs-on: self-hosted            # = the tiny vm (registered self-hosted runner)
     steps:
       - name: Checkout

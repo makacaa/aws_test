@@ -29,10 +29,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, x64]   # = the tiny vm (localemu-ec2-i-…)
-
-jobs:
-  deploy:
+    runs-on: self-hosted            # = the tiny vm (localemu-ec2-i-…)
     steps:
       - name: What vm am I (the runner IS the emulated vm)
         run: |

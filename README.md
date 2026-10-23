@@ -109,28 +109,54 @@ provider "aws" {
 }
 ```
 
-## GitHub Action (`deploy.yml`)
-
-`.github/workflows/deploy.yml` runs the whole thing on every push to `main`
-(and on demand via **Actions → deploy → Run workflow**):
+## `gh_runner/` — the CI-tuned twin (this is what the Action deploys)
 
 ```
-docker daemon check
+gh_runner/
+├── main.tf              same resources + an aws_internet_gateway (igw-…)
+├── terraform.tfvars     bucket localemu-gh-runner (its own bucket, so CI never
+│                        fights the local deploy above)
+├── bootstrap.sh         the runner bootstrap: docker guard, localemu start in
+│                        the FOREGROUND as a background job, log kept, gateway
+│                        polled, log dumped if it never binds
+├── vm/                  drop-to-s3.sh · verify-in-vm.sh · pull-from-s3.sh
+└── tools/vm-inspect.py  signed boto3 view (region-correct)
+```
+
+The Internet Gateway is the Linux-Docker half of the egress problem: LocalEmu
+creates a VPC's Docker network as `--internal` (no host egress), and
+`AttachInternetGateway` recreates it **without** `--internal` — that is what
+gives the vm a route to the emulator gateway on a plain Linux daemon, where
+Docker Desktop's `host.docker.internal` mapping cannot be relied on. Verified
+locally first: the IGW vm writes `/vm-outbox`, `aws s3 cp` up to
+`s3://localemu-gh-runner/vm/from-vm/`, and the sha256 round trip MATCHes.
+
+## GitHub Action (`deploy.yml`)
+
+`.github/workflows/deploy.yml` deploys the **`gh_runner/`** project on every push
+to `main` (and on demand via **Actions → deploy → Run workflow**):
+
+```
+docker daemon check (docker info)
   → install OpenTofu 1.13.2 (linux_amd64 release tarball)
-  → pip install localemu            (the emulator itself + host awscli)
-  → localemu start -d, poll http://localhost:4566/
-  → tofu init / plan / apply        (VPC + subnet + SG + tiny vm + bucket)
+  → pip install localemu                 (the emulator itself + host awscli)
+  → gh_runner/bootstrap.sh               (foreground start + log + gateway poll)
+  → cd gh_runner && tofu init/plan/apply (VPC + IGW + subnet + SG + vm + bucket)
   → docker exec into localemu-ec2-i-… : vm/drop-to-s3.sh + vm/verify-in-vm.sh
-  → awsemu s3 ls --recursive + tools/vm-inspect.py   (host-side verification)
-  → result written to the Actions summary
+  → awsemu s3 ls --recursive + gh_runner/tools/vm-inspect.py
+  → summary (vm id, IGW id, container, bucket listing)
   → localemu stop
 ```
 
-No AWS account, no token: the CI job talks only to `localhost:4566`. If the
-Actions daemon does not open `host.docker.internal` (or the VPC network's egress)
-into the instance container, the vm scripts fail with an explicit diagnostic and
-the workflow copies `data/vm-payload/*` in from the host side instead, labelling
-the run as a fallback in the summary rather than pretending the vm copy worked.
+No AWS account, no token: the runner talks only to `localhost:4566`, i.e. the
+emulator *is* the AWS it deploys against — "local AWS on the runner".
+
+Why `bootstrap.sh` instead of `localemu start -d`: detached mode re-execs
+`python -m localemu.runtime.main` with **stdout and stderr sent to DEVNULL**
+(`localemu/cli/main.py`), so a startup failure is invisible — the first CI run
+printed `LocalEmu started (PID: 2340)` then `gateway http=000` and died with no
+explanation. The bootstrap keeps the log, polls, and dumps the log if the
+port never binds, so the real error is in the Actions output.
 
 ## Gotchas (all hit live in this run)
 

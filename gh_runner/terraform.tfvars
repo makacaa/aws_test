@@ -1,0 +1,10 @@
+region        = "us-east-1"
+gateway_host  = "localhost"
+gateway_port  = 4566
+bucket_name   = "localemu-gh-runner"
+vm_prefix     = "vm"
+ami           = "ami-ubuntu-22.04" # -> localemu/ec2-base:v4 (awscli + sshd baked in)
+instance_type = "t2.micro"         # 1 GB docker memory limit
+vpc_cidr      = "10.0.0.0/16"
+subnet_cidr   = "10.0.1.0/24"
+host_cidrs    = ["0.0.0.0/0"]      # internet-facing: the emulator host gateway

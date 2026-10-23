@@ -1,12 +1,21 @@
 name: deploy
 
-# Deploys this terraform / OpenTofu project against LocalEmu — the free,
-# open-source AWS emulator (pip install localemu). GitHub's ubuntu image ships a
-# real Docker daemon, so LocalEmu's EC2 backend (EC2_VM_MANAGER=docker, the
-# default) launches a real container for aws_instance, and that container then
-# copies files up into the S3 bucket with the awscli baked into its AMI.
+# Deploys the gh_runner/ terraform project against LocalEmu — the free,
+# open-source AWS emulator that runs on the runner itself ("local AWS": no
+# account, no token, endpoint is localhost:4566 on the runner).
 #
-# Nothing here touches real AWS: no account, no token, no telemetry.
+#   runner bootstrap:  docker daemon -> OpenTofu -> pip install localemu
+#                      -> localemu start (foreground, logged, polled)
+#   terraform:         VPC + Internet Gateway + subnet + SG + tiny vm
+#                      + bucket + folder marker + manifest
+#   the vm:            docker exec into localemu-ec2-i-… : aws s3 cp up,
+#                      read back, sha256 compare
+#
+# Why not `localemu start -d`: detached mode re-execs `python -m
+# localemu.runtime.main` with stdout AND stderr sent to DEVNULL, so a startup
+# failure is invisible and the gateway just sits connection-refused. bootstrap.sh
+# starts it in the foreground as a background job, keeps the log, and dumps the
+# log if the gateway never binds.
 
 on:
   push:
@@ -15,15 +24,10 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04        # python3.12 (localemu requires >=3.10)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Show the docker daemon the emulator will use
-        run: |
-          docker version
-          docker info | grep -E "^ Containers|^ Client|Version" || true
 
       - name: Install OpenTofu
         run: |
@@ -45,79 +49,55 @@ jobs:
           python3 -m pip install --upgrade localemu
           localemu --help | head -4
           awsemu --version | head -1
+          python3 --version
 
-      - name: Start LocalEmu
+      - name: Bootstrap the local AWS emulator on the runner
+        run: gh_runner/bootstrap.sh
+
+      - name: tofu init / plan / apply (gh_runner project)
         run: |
           set -euo pipefail
-          localemu start -d
-          for i in $(seq 1 40); do
-            if curl -s -o /dev/null --max-time 5 http://localhost:4566/; then break; fi
-            sleep 3
-          done
-          curl -s -o /dev/null -w "gateway http=%{http_code}\n" http://localhost:4566/ || true
-          localemu status | tail -4
-
-      - name: tofu init / plan / apply
-        run: |
-          set -euo pipefail
+          cd gh_runner
           tofu init
           tofu plan
           tofu apply --auto-approve
-          echo "instance_id=$(tofu output --raw ec2_instance_id)"      >> "$GITHUB_OUTPUT"
-          echo "private_ip=$(tofu output --raw ec2_private_ip)"        >> "$GITHUB_OUTPUT"
-          echo "vm_container=$(tofu output --raw vm_container)"        >> "$GITHUB_OUTPUT"
+          echo "instance_id=$(tofu output --raw ec2_instance_id)" >> "$GITHUB_OUTPUT"
+          echo "vm_container=$(tofu output --raw vm_container)"   >> "$GITHUB_OUTPUT"
+          echo "igw_id=$(tofu output --raw igw_id)"               >> "$GITHUB_OUTPUT"
         id: coords
 
       - name: tiny vm -> s3 (aws s3 cp from inside the emulated vm)
-        id: vmcopy
-        continue-on-error: true
         run: |
           set -euo pipefail
-          CID="$(tofu output --raw vm_container)"
-          echo "container: $CID"
-          docker exec -i -e BUCKET=localemu-vm-drop -e PREFIX=vm "$CID" bash -s \
-            < vm/drop-to-s3.sh
-          docker exec -i -e BUCKET=localemu-vm-drop -e PREFIX=vm "$CID" bash -s \
-            < vm/verify-in-vm.sh
-
-      # The vm reaches the emulator through Docker's host gateway. On some Linux
-      # daemons that mapping (or the VPC network's egress) is not open, and the
-      # vm scripts say so instead of hanging. The payload then goes in from the
-      # host side, which is labelled in the summary as a fallback, not a pass.
-      - name: "fallback: host-side copy (only if the vm could not reach the gateway)"
-        if: steps.vmcopy.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          echo "VM_EGRESS=blocked" >> "$GITHUB_ENV"
-          for f in vm-hello.txt vm-report.json nested/vm-nested.txt; do
-            awsemu s3 cp "data/vm-payload/$f" "s3://localemu-vm-drop/vm/from-vm/$f"
-          done
+          CID="$(cd gh_runner && tofu output --raw vm_container)"
+          BUCKET="$(cd gh_runner && tofu output --raw s3_root)"
+          BUCKET="${BUCKET#s3://}"; BUCKET="${BUCKET%%/*}"; PREFIX="vm"
+          echo "container: $CID   bucket: $BUCKET   prefix: $PREFIX"
+          docker exec -i -e BUCKET="$BUCKET" -e PREFIX="$PREFIX" "$CID" bash -s \
+            < gh_runner/vm/drop-to-s3.sh
+          docker exec -i -e BUCKET="$BUCKET" -e PREFIX="$PREFIX" "$CID" bash -s \
+            < gh_runner/vm/verify-in-vm.sh
 
       - name: verify the bucket from the host
         run: |
           set -euo pipefail
-          awsemu s3 ls --recursive "s3://localemu-vm-drop/vm/"
-          python3 tools/vm-inspect.py \
-            --instance "$(tofu output --raw ec2_instance_id)" \
-            --bucket localemu-vm-drop --prefix vm/
+          awsemu s3 ls --recursive "s3://localemu-gh-runner/vm/"
+          python3 gh_runner/tools/vm-inspect.py \
+            --instance "$(cd gh_runner && tofu output --raw ec2_instance_id)" \
+            --bucket localemu-gh-runner --prefix vm/
 
       - name: summary
         run: |
           {
-            echo "## deploy result"
-            echo "- vm: \`$(tofu output --raw ec2_instance_id)\` @ \`$(tofu output --raw ec2_private_ip)\`"
-            echo "- container: \`$(tofu output --raw vm_container)\`"
-            echo "- bucket: \`s3://localemu-vm-drop/vm/\`"
+            echo "## deploy result (LocalEmu on the runner)"
+            echo "- vm: \`$(cd gh_runner && tofu output --raw ec2_instance_id)\` @ \`$(cd gh_runner && tofu output --raw ec2_private_ip)\`"
+            echo "- internet gateway: \`$(cd gh_runner && tofu output --raw igw_id)\`"
+            echo "- container: \`$(cd gh_runner && tofu output --raw vm_container)\`"
+            echo "- bucket: \`s3://localemu-gh-runner/vm/\`"
             echo '```'
-            tofu plan --summary
-            awsemu s3 ls --recursive "s3://localemu-vm-drop/vm/"
+            (cd gh_runner && tofu plan --summary)
+            awsemu s3 ls --recursive "s3://localemu-gh-runner/vm/"
             echo '```'
-            if [ "${VM_EGRESS:-open}" = "blocked" ]; then
-              echo "> vm egress to the emulator gateway was blocked on this daemon;"
-              echo "> the payload was copied from the host side instead."
-            else
-              echo "> the payload was copied **from inside the vm** (aws s3 cp)."
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: stop the emulator

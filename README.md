@@ -97,8 +97,7 @@ bucket, and the vm knows its own instance id via IMDS.
 ```hcl
 provider "aws" {
   region      = "us-east-1"
-  access_key  = "AKIAIOSFODNN7EXAMPLE"
-  secret_key  = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  # creds from the environment - never hardcode them here
 
   s3_use_path_style           = true
   skip_credentials_validation = true

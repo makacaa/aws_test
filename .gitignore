@@ -10,3 +10,13 @@ terraform.tfstate.d/
 # python
 __pycache__/
 *.pyc
+
+# secrets: never commit credentials of any kind
+secrets.env
+*.env
+!secrets.example.env
+credentials*
+*.pem
+*.key
+id_rsa*
+*.log

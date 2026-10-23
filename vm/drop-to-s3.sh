@@ -61,8 +61,8 @@ done
 # --- credentials: IMDS role first, else the emulator's dummy pair -----------
 if ! aws s3 ls "s3://${BUCKET}/${PREFIX}/" >/dev/null 2>&1; then
   echo "-- no IMDS role on this instance -> using LocalEmu's dummy pair --"
-  export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-  export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  : "${AWS_ACCESS_KEY_ID:?set it (LocalEmu bakes creds into the vm; host: source secrets.env)}"
+  : "${AWS_SECRET_ACCESS_KEY:?set it (LocalEmu bakes creds into the vm; host: source secrets.env)}"
 fi
 export AWS_PAGER=""
 

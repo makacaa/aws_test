@@ -35,8 +35,8 @@ CURRENT = arg("instance", "")
 _kw = dict(
     region_name=REGION,
     endpoint_url=GATEWAY,
-    aws_access_key_id="AKIAIOSFODNN7EXAMPLE",
-    aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+    aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
 )
 ec2 = boto3.client("ec2", **_kw)
 s3 = boto3.client("s3", **_kw)

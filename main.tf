@@ -119,8 +119,9 @@ locals {
 # ------------------------------------------------------------------------------
 provider "aws" {
   region      = var.region
-  access_key  = "AKIAIOSFODNN7EXAMPLE"
-  secret_key  = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  # credentials come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY):
+  #   CI  -> GitHub secrets (see .github/workflows/1-plan.yml)
+  #   host-> source secrets.env (see secrets.example.env)
 
   s3_use_path_style           = true
   skip_credentials_validation = true

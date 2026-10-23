@@ -20,3 +20,7 @@ credentials*
 *.key
 id_rsa*
 *.log
+
+# emulator artifacts
+emu-export/
+*.json.tmp

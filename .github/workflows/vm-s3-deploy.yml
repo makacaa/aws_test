@@ -15,18 +15,26 @@ name: vm-s3-deploy
 #
 # Requires the runner to be registered (see github_runner/README-runner.md).
 
-run:
-  target: github_runner          # the self-hosted runner = the emulated vm
-
 on:
   push:
     branches: [main]
   workflow_dispatch: {}
 
+# This account's schema rejects the newer `run: {target: …}` multi-runner form
+# ("Unexpected value 'run'"), so the vm is selected the classic way. There is
+# exactly one self-hosted runner registered — the emulated vm — so this lands on
+# it. To pin it by name instead, rename the runner to github_runner in Settings
+# → Actions → Settings → Self-hosted and use:
+#   actions: { target: { runner: github_runner, repository: makacaa/aws_test } }
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, x64]   # = the tiny vm (localemu-ec2-i-…)
+
 jobs:
   deploy:
     steps:
-      - name: What vm am I (the runner IS the vm)
+      - name: What vm am I (the runner IS the emulated vm)
         run: |
           set -euo pipefail
           echo "instance : ${LOCALEMU_INSTANCE_ID:-?}"

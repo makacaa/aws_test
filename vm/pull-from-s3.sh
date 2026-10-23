@@ -29,7 +29,7 @@ _gateway_ok() {
   curl -sS -m 5 -o /dev/null "${AWS_ENDPOINT_URL%/}/_health" 2>/dev/null || return 1
 }
 if !_gateway_ok; then
-  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | head -1 | cut -f1)
+  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | sed -n '1,2p' | cut -f1)
   [ -n "$_gw" ] && export AWS_ENDPOINT_URL="http://${_gw}:4566"
 fi
 if !_gateway_ok; then

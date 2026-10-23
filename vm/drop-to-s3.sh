@@ -33,7 +33,7 @@ _gateway_ok() {
   curl -sS -m 5 -o /dev/null "${AWS_ENDPOINT_URL%/}/_health" 2>/dev/null || return 1
 }
 if !_gateway_ok; then
-  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | head -1 | cut -f1)
+  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | sed -n '1,2p' | cut -f1)
   [ -n "$_gw" ] && export AWS_ENDPOINT_URL="http://${_gw}:4566"
 fi
 if !_gateway_ok; then
@@ -68,7 +68,7 @@ export AWS_PAGER=""
 
 # --- 1. read what terraform wrote, from inside the vm ----------------------
 echo "-- GET <bucket>/<prefix>/tf-manifest.json from inside the vm --"
-aws s3 cp "s3://${BUCKET}/${PREFIX}/tf-manifest.json" - 2>/dev/null | head -c 400 || echo "  (manifest missing)"
+aws s3 cp "s3://${BUCKET}/${PREFIX}/tf-manifest.json" - 2>/dev/null | sed -n '1,4p' || echo "  (manifest missing)"
 echo
 
 # --- 2. write files on the vm's own filesystem ------------------------------
@@ -114,5 +114,5 @@ aws s3api put-object --bucket "$BUCKET" --key "${PREFIX}/${SUBPREFIX}/" >/dev/nu
 echo "-- aws s3 ls s3://${BUCKET}/${PREFIX}/${SUBPREFIX}/ --"
 aws s3 ls "s3://${BUCKET}/${PREFIX}/${SUBPREFIX}/"
 echo "-- aws s3 cat (cp to -) vm-hello.txt --"
-aws s3 cp "s3://${BUCKET}/${PREFIX}/${SUBPREFIX}/vm-hello.txt" - 2>/dev/null | head -20
+aws s3 cp "s3://${BUCKET}/${PREFIX}/${SUBPREFIX}/vm-hello.txt" - 2>/dev/null | sed -n '1,20p'
 echo "==> vm drop complete"

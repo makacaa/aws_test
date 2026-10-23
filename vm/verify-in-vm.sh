@@ -24,7 +24,7 @@ _gateway_ok() {
   curl -sS -m 5 -o /dev/null "${AWS_ENDPOINT_URL%/}/_health" 2>/dev/null || return 1
 }
 if !_gateway_ok; then
-  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | head -1 | cut -f1)
+  _gw=$(grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}[[:space:]]+host\.docker\.internal$' /etc/hosts | sed -n '1,2p' | cut -f1)
   [ -n "$_gw" ] && export AWS_ENDPOINT_URL="http://${_gw}:4566"
 fi
 if !_gateway_ok; then
@@ -47,7 +47,7 @@ aws s3 ls --recursive "s3://${BUCKET}/${PREFIX}/"
 
 echo "-- keys + sizes + etags (aws s3api list-objects-v2) --"
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${PREFIX}/" \
-  --output table --query 'Contents[].[Key,Size,Etag]' | head -30
+  --output table --query 'Contents[].[Key,Size,Etag]' | sed -n '1,30p'
 
 echo "-- sha256 of the vm's own copy vs the s3 copy --"
 for f in vm-hello.txt vm-report.json nested/vm-nested.txt; do

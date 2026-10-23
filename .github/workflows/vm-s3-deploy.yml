@@ -1,0 +1,110 @@
+name: vm-s3-deploy
+
+# Runs ON the tiny vm itself. The vm (aws_instance "github_runner", a real
+# Ubuntu 22.04 Docker container launched by LocalEmu's EC2 backend) is
+# registered as a GitHub **self-hosted runner**, so every step below executes
+# inside that vm — terraform deploys against the local AWS emulator that lives
+# on the vm's host (host.docker.internal:4566), and the payload is copied from
+# the vm's own filesystem up into the emulator's S3 bucket.
+#
+#   vm ──aws s3 cp──▶ s3://localemu-runner-logs/runner/from-vm/   (local AWS)
+#   vm ──curl───────▶ github.com                                   (internet,
+#                                                                  via the VPC's
+#                                                                  Internet Gateway
+#                                                                  + SG egress)
+#
+# Requires the runner to be registered (see github_runner/README-runner.md).
+
+run:
+  target: github_runner          # the self-hosted runner = the emulated vm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    steps:
+      - name: What vm am I (the runner IS the vm)
+        run: |
+          set -euo pipefail
+          echo "instance : ${LOCALEMU_INSTANCE_ID:-?}"
+          echo "type     : ${LOCALEMU_INSTANCE_TYPE:-?}"
+          echo "region   : ${LOCALEMU_REGION:-?}"
+          echo "gateway  : ${AWS_ENDPOINT_URL:-?}"
+          echo "imds     : $(curl -sS -m 5 -H 'Accept: text/plain' http://169.254.169.254/latest/meta-data/instance-id || echo unreachable)"
+          docker version 2>/dev/null | head -3 || echo "no docker inside the vm (fine: the vm is the container)"
+
+      - name: Install OpenTofu (downloaded through the vm's internet egress)
+        run: |
+          set -euo pipefail
+          url="https://github.com/opentofu/opentofu/releases/download/v1.13.2/tofu_1.13.2_linux_amd64.tar.gz"
+          curl -fsSL -o /tmp/tofu.tar.gz "$url"
+          mkdir -p /tmp/tofu-bin
+          tar -xzf /tmp/tofu.tar.gz -C /tmp/tofu-bin
+          bin="$(find /tmp/tofu-bin -type f -name tofu | head -1)"
+          mv "$bin" /usr/local/bin/tofu
+          chmod 755 /usr/local/bin/tofu
+          tofu version
+
+      - name: tofu apply (against the local AWS emulator, from inside the vm)
+        run: |
+          set -euo pipefail
+          # inside the vm "localhost" is the vm itself; the emulator is on its
+          # host, so the gateway host has to be the host gateway
+          cd github_runner
+          tofu init
+          tofu plan  -var gateway_host=host.docker.internal
+          tofu apply -var gateway_host=host.docker.internal --auto-approve
+          tofu output --raw ec2_instance_id
+          tofu output --raw vm_container
+
+      - name: vm -> s3 (aws s3 cp from inside the vm into the emulator bucket)
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+          export AWS_PAGER=""
+          mkdir -p /tmp/vm-outbox
+          {
+            echo "hello from the runner vm"
+            echo "instance_id = ${LOCALEMU_INSTANCE_ID:-?}"
+            echo "action      = vm-s3-deploy"
+            echo "written_at  = $(date -u +%FT%TZ)"
+          } > /tmp/vm-outbox/from-action.txt
+          cp data/vm-payload/vm-hello.txt     /tmp/vm-outbox/
+          cp data/vm-payload/vm-report.json   /tmp/vm-outbox/
+          cp data/vm-payload/nested/vm-nested.txt /tmp/vm-outbox/nested.txt
+          for f in from-action.txt vm-hello.txt vm-report.json nested.txt; do
+            aws s3 cp "/tmp/vm-outbox/$f" "s3://localemu-runner-logs/runner/from-vm/$f"
+          done
+          aws s3api put-object --bucket localemu-runner-logs --key "runner/from-vm/" >/dev/null
+
+      - name: verify the round trip from inside the vm
+        run: |
+          set -euo pipefail
+          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+          export AWS_PAGER=""
+          aws s3 ls --recursive s3://localemu-runner-logs/runner/
+          for f in from-action.txt vm-hello.txt vm-report.json nested.txt; do
+            a=$(sha256sum "/tmp/vm-outbox/$f" 2>/dev/null | cut -d' ' -f1 || echo -)
+            b=$(aws s3 cp "s3://localemu-runner-logs/runner/from-vm/$f" - 2>/dev/null | sha256sum | cut -d' ' -f1 || echo -)
+            printf "%-16s vm=%s s3=%s %s\n" "$f" "$a" "$b" \
+              "$([ "$a" = "$b" ] && echo MATCH || echo DIFF)"
+          done
+
+      - name: summary
+        run: |
+          {
+            echo "## vm-s3-deploy (self-hosted on the emulated vm)"
+            echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  type \`${LOCALEMU_INSTANCE_TYPE:-?}\`"
+            echo "- emulator: \`${AWS_ENDPOINT_URL:-?}\`"
+            echo "- bucket: \`s3://localemu-runner-logs/runner/\`"
+            echo '```'
+            AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
+            AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+            aws s3 ls --recursive s3://localemu-runner-logs/runner/
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

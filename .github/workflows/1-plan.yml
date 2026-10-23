@@ -62,17 +62,20 @@ jobs:
           rm -f .terraform.lock.hcl
           tofu init
           tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
-            | sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tee /tmp/plan.txt >/dev/null
-          echo "-- resource lines --"
-          grep -E "^ *[+#~-] aws_|will be created|will be updated|will be destroyed|Plan:" /tmp/plan.txt
-          echo "-- full plan --"
+            >/tmp/plan.txt 2>/tmp/plan.err || echo "tofu plan exit=$?"
+          sed -r -i 's/\x1b\[[0-9;?]*[a-zA-Z]//g' /tmp/plan.txt /tmp/plan.err
+          echo "-- plan stdout ($(wc -l </tmp/plan.txt) lines) --"
           cat /tmp/plan.txt
+          echo "-- plan stderr ($(wc -l </tmp/plan.err) lines) --"
+          cat /tmp/plan.err
+          echo "-- resource lines --"
+          grep -E "^ *[+#~-] aws_|will be created|will be updated|will be destroyed|Plan:|No changes" /tmp/plan.txt || echo "(no plan lines)"
           {
             echo "## STAGE 1/2 — plan (nothing deployed)"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  gateway: \`${AWS_ENDPOINT_URL:-?}\`"
             echo "- state: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
-            grep -E "^ *[+#~-] aws_|will be created|will be updated|will be destroyed|Plan:" /tmp/plan.txt
+            grep -E "^ *[+#~-] aws_|will be created|will be updated|will be destroyed|Plan:|No changes" /tmp/plan.txt || true
             echo '```'
             echo "> Stage 2 is a **separate box**: Actions → **2-deploy** → Run workflow"
             echo "> → type the approval phrase in the input."

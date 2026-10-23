@@ -155,8 +155,8 @@ jobs:
             echo "action      = vm-s3-deploy (approved)"
             echo "written_at  = $(date -u +%FT%TZ)"
           } > /tmp/vm-outbox/from-action.txt
-          cp ../data/vm-payload/vm-hello.txt   /tmp/vm-outbox/vm-hello.txt
-          cp ../data/vm-payload/vm-report.json /tmp/vm-outbox/vm-report.json
+          cp data/vm-payload/vm-hello.txt   /tmp/vm-outbox/vm-hello.txt
+          cp data/vm-payload/vm-report.json /tmp/vm-outbox/vm-report.json
           for f in from-action.txt vm-hello.txt vm-report.json; do
             aws s3 cp "/tmp/vm-outbox/$f" "s3://localemu-runner-logs/runner/from-vm/$f"
           done

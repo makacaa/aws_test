@@ -1,0 +1,2 @@
+hello from the tiny vm
+note: static payload used by the CI fallback path

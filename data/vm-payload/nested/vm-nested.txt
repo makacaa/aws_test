@@ -1,0 +1,1 @@
+vm drop #2 - nested path, static CI payload

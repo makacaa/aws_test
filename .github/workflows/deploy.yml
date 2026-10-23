@@ -1,0 +1,126 @@
+name: deploy
+
+# Deploys this terraform / OpenTofu project against LocalEmu — the free,
+# open-source AWS emulator (pip install localemu). GitHub's ubuntu image ships a
+# real Docker daemon, so LocalEmu's EC2 backend (EC2_VM_MANAGER=docker, the
+# default) launches a real container for aws_instance, and that container then
+# copies files up into the S3 bucket with the awscli baked into its AMI.
+#
+# Nothing here touches real AWS: no account, no token, no telemetry.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show the docker daemon the emulator will use
+        run: |
+          docker version
+          docker info | grep -E "^ Containers|^ Client|Version" || true
+
+      - name: Install OpenTofu
+        run: |
+          set -euo pipefail
+          url="https://github.com/opentofu/opentofu/releases/download/v1.13.2/tofu_1.13.2_linux_amd64.tar.gz"
+          curl -fsSL -o /tmp/tofu.tar.gz "$url"
+          mkdir -p /tmp/tofu-bin
+          tar -xzf /tmp/tofu.tar.gz -C /tmp/tofu-bin
+          bin="$(find /tmp/tofu-bin -type f -name tofu | head -1)"
+          echo "tofu binary: $bin"
+          sudo mv "$bin" /usr/local/bin/tofu
+          sudo chmod 755 /usr/local/bin/tofu
+          tofu version
+
+      - name: Install LocalEmu
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y python3-pip || true
+          python3 -m pip install --upgrade localemu
+          localemu --help | head -4
+          awsemu --version | head -1
+
+      - name: Start LocalEmu
+        run: |
+          set -euo pipefail
+          localemu start -d
+          for i in $(seq 1 40); do
+            if curl -s -o /dev/null --max-time 5 http://localhost:4566/; then break; fi
+            sleep 3
+          done
+          curl -s -o /dev/null -w "gateway http=%{http_code}\n" http://localhost:4566/ || true
+          localemu status | tail -4
+
+      - name: tofu init / plan / apply
+        run: |
+          set -euo pipefail
+          tofu init
+          tofu plan
+          tofu apply --auto-approve
+          echo "instance_id=$(tofu output --raw ec2_instance_id)"      >> "$GITHUB_OUTPUT"
+          echo "private_ip=$(tofu output --raw ec2_private_ip)"        >> "$GITHUB_OUTPUT"
+          echo "vm_container=$(tofu output --raw vm_container)"        >> "$GITHUB_OUTPUT"
+        id: coords
+
+      - name: tiny vm -> s3 (aws s3 cp from inside the emulated vm)
+        id: vmcopy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          CID="$(tofu output --raw vm_container)"
+          echo "container: $CID"
+          docker exec -i -e BUCKET=localemu-vm-drop -e PREFIX=vm "$CID" bash -s \
+            < vm/drop-to-s3.sh
+          docker exec -i -e BUCKET=localemu-vm-drop -e PREFIX=vm "$CID" bash -s \
+            < vm/verify-in-vm.sh
+
+      # The vm reaches the emulator through Docker's host gateway. On some Linux
+      # daemons that mapping (or the VPC network's egress) is not open, and the
+      # vm scripts say so instead of hanging. The payload then goes in from the
+      # host side, which is labelled in the summary as a fallback, not a pass.
+      - name: "fallback: host-side copy (only if the vm could not reach the gateway)"
+        if: steps.vmcopy.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "VM_EGRESS=blocked" >> "$GITHUB_ENV"
+          for f in vm-hello.txt vm-report.json nested/vm-nested.txt; do
+            awsemu s3 cp "data/vm-payload/$f" "s3://localemu-vm-drop/vm/from-vm/$f"
+          done
+
+      - name: verify the bucket from the host
+        run: |
+          set -euo pipefail
+          awsemu s3 ls --recursive "s3://localemu-vm-drop/vm/"
+          python3 tools/vm-inspect.py \
+            --instance "$(tofu output --raw ec2_instance_id)" \
+            --bucket localemu-vm-drop --prefix vm/
+
+      - name: summary
+        run: |
+          {
+            echo "## deploy result"
+            echo "- vm: \`$(tofu output --raw ec2_instance_id)\` @ \`$(tofu output --raw ec2_private_ip)\`"
+            echo "- container: \`$(tofu output --raw vm_container)\`"
+            echo "- bucket: \`s3://localemu-vm-drop/vm/\`"
+            echo '```'
+            tofu plan --summary
+            awsemu s3 ls --recursive "s3://localemu-vm-drop/vm/"
+            echo '```'
+            if [ "${VM_EGRESS:-open}" = "blocked" ]; then
+              echo "> vm egress to the emulator gateway was blocked on this daemon;"
+              echo "> the payload was copied from the host side instead."
+            else
+              echo "> the payload was copied **from inside the vm** (aws s3 cp)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: stop the emulator
+        if: always()
+        continue-on-error: true
+        run: localemu stop || true

@@ -1,0 +1,7 @@
+# keep LF everywhere: shell scripts and terraform must not get CRLF
+* text=auto eol=lf
+*.sh text eol=lf
+*.tf text eol=lf
+*.tfvars text eol=lf
+*.yml text eol=lf
+*.py text eol=lf

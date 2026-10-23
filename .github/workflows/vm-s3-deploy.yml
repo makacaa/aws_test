@@ -33,9 +33,12 @@ on:
 # text, so anything exported inline shows up in the log. These are LocalEmu's
 # documented dummy pair (the emulator accepts anything) — for real AWS move them
 # to gh secret set and reference them as ${{ secrets.NAME }}.
+# Values come from repo secrets (gh secret set) so GitHub masks them in every
+# log line (*** in the Actions log). They are LocalEmu's documented dummy pair,
+# but the same wiring works unchanged for real AWS credentials.
 env:
-  AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
-  AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_PAGER: ""
   NO_COLOR: "1"
   TOFU_DISABLE_COLOR: "1"
@@ -94,14 +97,19 @@ jobs:
           rm -f .terraform.lock.hcl
           tofu init
           # tofu's ANSI colours show up as ?[32m garbage in the Actions log/summary
+          # full plan, no tail: GitHub shows the whole step output in the log
           tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
-            | sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tee /tmp/plan.txt | tail -40
+            | sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tee /tmp/plan.txt >/dev/null
+          echo "-- resource lines --"
+          grep -E "^ *[+#~-] aws_|will be created|will be updated|will be destroyed|Plan:" /tmp/plan.txt
+          echo "-- full plan --"
+          cat /tmp/plan.txt
           {
             echo "## STEP 1/2 — plan (nothing deployed)"
             echo "- vm: \`${LOCALEMU_INSTANCE_ID:-?}\`  gateway: \`${AWS_ENDPOINT_URL:-?}\`"
             echo "- state: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
-            grep -E "Plan:|will be created|will be updated|will be destroyed|^ *# |^ *[-+~] aws_|to add" /tmp/plan.txt | head -40
+            head -260 /tmp/plan.txt
             echo '```'
             echo "> **This workflow stops here.** To deploy, run it again and set"
             echo "> \`approve_deploy = APPLY\` (Actions → vm-s3-deploy → Run workflow)."

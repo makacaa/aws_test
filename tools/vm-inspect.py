@@ -59,8 +59,12 @@ print("  stops the container, but the persisted instance record stays until")
 print("  the emulator restarts (same shape as real AWS's DescribeInstances).")
 
 print("\n== docker: the instance containers LocalEmu actually launched ==")
-out = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True)
-for line in (out.stdout or "").splitlines():
+try:
+    out = subprocess.run(["docker", "ps", "-a"], capture_output=True, text=True)
+except FileNotFoundError:
+    print("  (no docker client inside the vm - the vm IS the container; LocalEmu launched it on the host)")
+    out = None
+for line in ((out.stdout if out else "") or "").splitlines():
     if "localemu-ec2" in line or "localemu-imds" in line:
         print("  " + line.strip())
 

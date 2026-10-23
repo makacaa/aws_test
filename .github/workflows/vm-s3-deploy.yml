@@ -2,8 +2,8 @@ name: vm-s3-deploy
 
 # TWO SEPARATE STEPS, ONE WORKFLOW
 #
-#   STEP 1  plan     runs on every push AND on demand. It writes nothing, prints
-#                    the plan, and then the workflow ENDS. Nothing else runs.
+#   STEP 1  plan     runs on demand only. It writes nothing, prints the plan, and
+#                    the workflow ENDS. Nothing else runs.
 #   STEP 2  deploy   never runs automatically. It runs only when you start this
 #                    workflow a second time and pick "APPLY" in the input box —
 #                    i.e. it waits for you.
@@ -29,6 +29,17 @@ on:
           - "no"
           - "APPLY"
 
+# Credentials live here, not in the scripts: the Actions log echoes the script
+# text, so anything exported inline shows up in the log. These are LocalEmu's
+# documented dummy pair (the emulator accepts anything) — for real AWS move them
+# to gh secret set and reference them as ${{ secrets.NAME }}.
+env:
+  AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+  AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  AWS_PAGER: ""
+  NO_COLOR: "1"
+  TOFU_DISABLE_COLOR: "1"
+
 jobs:
   # ==========================================================================
   # STEP 1 — plan only. Ends here unless you re-run with approve_deploy=APPLY.
@@ -39,12 +50,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install the vm's python tooling (boto3 for the inventory)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade boto3 botocore s3transfer >/dev/null
+          python3 -c "import boto3; print('boto3', boto3.__version__)"
+
       - name: Show the vm + the whole EC2 graph (what the emulator actually holds)
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           echo "-- the vm this job runs on --"
           echo "LOCALEMU_INSTANCE_ID=${LOCALEMU_INSTANCE_ID:-?}  type=${LOCALEMU_INSTANCE_TYPE:-?}"
           echo "gateway=${AWS_ENDPOINT_URL:-?}"
@@ -69,9 +83,6 @@ jobs:
       - name: Pull tfstate out of the persistent state bucket
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           cd github_runner
           aws s3 cp "s3://localemu-tf-state/state/aws_test.tfstate" terraform.tfstate \
             || echo "no tfstate yet (fresh deploy)"
@@ -82,10 +93,7 @@ jobs:
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
-          # NO_COLOR + TOFU_DISABLE_COLOR: tofu's ANSI colours show up as ?[32m
-          # garbage in the Actions log/summary, so ask for plain text and strip
-          # any escape sequences that still slip through.
-          export NO_COLOR=1 TOFU_DISABLE_COLOR=1
+          # tofu's ANSI colours show up as ?[32m garbage in the Actions log/summary
           tofu plan -var gateway_host=host.docker.internal -out /tmp/plan.bin \
             | sed -r 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tee /tmp/plan.txt | tail -40
           {
@@ -124,9 +132,6 @@ jobs:
       - name: Pull tfstate from the state bucket
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           cd github_runner
           aws s3 cp "s3://localemu-tf-state/state/aws_test.tfstate" terraform.tfstate \
             || echo "no tfstate yet (fresh deploy)"
@@ -134,21 +139,17 @@ jobs:
       - name: tofu apply (approved)
         run: |
           set -euo pipefail
-          export NO_COLOR=1 TOFU_DISABLE_COLOR=1   # plain text in the Actions log
           cd github_runner
           rm -f .terraform.lock.hcl
           tofu init
           tofu apply -var gateway_host=host.docker.internal --auto-approve
           echo "instance_id=$(tofu output --raw ec2_instance_id)"
           echo "vm_container=$(tofu output --raw vm_container)"
-          echo "vpc=$(tofu output --raw igw_id)"
+          echo "igw=$(tofu output --raw igw_id)"
 
       - name: push tfstate back into the persistent state bucket
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           cd github_runner
           aws s3 cp terraform.tfstate "s3://localemu-tf-state/state/aws_test.tfstate"
           aws s3 cp terraform.tfstate.backup "s3://localemu-tf-state/state/aws_test.tfstate.backup" \
@@ -157,9 +158,6 @@ jobs:
       - name: vm -> s3 (aws s3 cp from inside the vm)
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           mkdir -p /tmp/vm-outbox
           {
             echo "hello from the runner vm"
@@ -177,9 +175,6 @@ jobs:
       - name: verify the round trip from inside the vm
         run: |
           set -euo pipefail
-          export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-          export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-          export AWS_PAGER=""
           aws s3 ls --recursive s3://localemu-runner-logs/runner/
           for f in from-action.txt vm-hello.txt vm-report.json; do
             a=$(sha256sum "/tmp/vm-outbox/$f" 2>/dev/null | cut -d' ' -f1 || echo -)
@@ -203,8 +198,7 @@ jobs:
             echo "- payload: \`s3://localemu-runner-logs/runner/from-vm/\`"
             echo "- tfstate: \`s3://localemu-tf-state/state/aws_test.tfstate\`"
             echo '```'
-            AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE \
-            AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
             aws s3 ls --recursive s3://localemu-runner-logs/runner/
+            aws s3 ls s3://localemu-tf-state/state/
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
